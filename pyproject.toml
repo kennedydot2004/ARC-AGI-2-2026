@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arc-agi-2-2026"
+version = "0.1.0"
+description = "A reproducible symbolic solver for the ARC Prize 2026 ARC-AGI-2 competition."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.scripts]
+arc-solve = "arc_solver.cli:main"
+arc-evaluate = "arc_solver.evaluate:main"
+
+[tool.setuptools.packages.find]
+include = ["arc_solver*"]
