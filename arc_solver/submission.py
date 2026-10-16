@@ -6,12 +6,36 @@ from typing import Any
 
 from .grids import Grid, as_grid, to_json_grid
 from .inference import solve_task
+from .proposer import ProgramProposer
 
 
-def make_submission(challenges: dict[str, Any], max_depth: int = 2) -> dict[str, list[dict[str, Any]]]:
+def make_submission(
+    challenges: dict[str, Any],
+    max_depth: int = 2,
+    proposer: ProgramProposer | None = None,
+    proposal_count: int = 3,
+    diagnostics: list[dict[str, Any]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     submission: dict[str, list[dict[str, Any]]] = {}
     for task_id, task in challenges.items():
-        predictions = solve_task(task, max_depth=max_depth)
+        predictions = solve_task(
+            task,
+            max_depth=max_depth,
+            proposer=proposer,
+            proposal_count=proposal_count,
+        )
+        if diagnostics is not None:
+            first = predictions[0]
+            diagnostics.append(
+                {
+                    "task_id": task_id,
+                    "consistent_programs": first.consistent_program_count,
+                    "model_proposals": first.model_proposal_count,
+                    "model_accepted": first.model_accepted_count,
+                    "model_rejected": first.model_rejected_count,
+                    "rejection_reasons": first.model_rejection_reasons,
+                }
+            )
         submission[task_id] = [
             {
                 "attempt_1": to_json_grid(prediction.attempt_1),

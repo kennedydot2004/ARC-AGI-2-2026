@@ -8,6 +8,7 @@ from typing import Any
 
 from .grids import Grid, as_grid
 from .operations import Operation, build_operations
+from .proposer import ProgramProposer
 
 
 @dataclass(frozen=True)
@@ -40,19 +41,27 @@ class Program:
         return result
 
 
+def _program_signature(program: Program) -> tuple[str, ...]:
+    return tuple(operation.name for operation in program.operations)
+
+
 @dataclass(frozen=True)
 class SolveResult:
     attempt_1: Grid
     attempt_2: Grid
     program_names: tuple[str, ...]
     consistent_program_count: int
+    model_proposal_count: int = 0
+    model_accepted_count: int = 0
+    model_rejected_count: int = 0
+    model_rejection_reasons: tuple[str, ...] = ()
 
 
 def _candidate_programs(
     examples: list[tuple[Grid, Grid]],
     max_depth: int,
+    operations: list[Operation],
 ) -> list[Program]:
-    operations = build_operations(examples)
     first_input, first_output = examples[0]
     one_step: list[tuple[Operation, Grid | None]] = [
         (operation, operation.apply(first_input)) for operation in operations
@@ -87,10 +96,17 @@ def _candidate_programs(
     return sorted(consistent.values(), key=lambda program: (program.cost, program.name))
 
 
-def solve_task(task: dict[str, Any], max_depth: int = 2) -> list[SolveResult]:
+def solve_task(
+    task: dict[str, Any],
+    max_depth: int = 2,
+    proposer: ProgramProposer | None = None,
+    proposal_count: int = 3,
+) -> list[SolveResult]:
     """Infer a transformation from all demonstrations and predict each test input."""
     if max_depth not in (1, 2):
         raise ValueError("max_depth must be 1 or 2.")
+    if proposal_count < 1:
+        raise ValueError("proposal_count must be positive.")
     raw_train = task.get("train")
     raw_test = task.get("test")
     if not isinstance(raw_train, list) or not raw_train:
@@ -101,8 +117,72 @@ def solve_task(task: dict[str, Any], max_depth: int = 2) -> list[SolveResult]:
     examples: list[tuple[Grid, Grid]] = []
     for pair in raw_train:
         examples.append((as_grid(pair["input"]), as_grid(pair["output"])))
-    programs = _candidate_programs(examples, max_depth)
+    operations = build_operations(examples)
+    programs = _candidate_programs(examples, max_depth, operations)
     test_inputs = [as_grid(pair["input"]) for pair in raw_test]
+    model_proposal_count = 0
+    model_accepted_count = 0
+    model_rejection_reasons: list[str] = []
+    model_program_signatures: set[tuple[str, ...]] = set()
+    if proposer is not None:
+        safe_task = {
+            "train": [
+                {"input": source, "output": target}
+                for source, target in examples
+            ],
+            "test": [{"input": grid} for grid in test_inputs],
+        }
+        proposals = proposer.propose(safe_task, operations, proposal_count)
+        model_proposal_count = len(proposals)
+        operations_by_name = {operation.name: operation for operation in operations}
+        model_programs: dict[tuple[str, ...], Program] = {}
+        for proposal in proposals:
+            if proposal.error is not None:
+                model_rejection_reasons.append(proposal.error)
+                continue
+            if proposal.operation_names is None:
+                model_rejection_reasons.append("Proposal contained no operation sequence.")
+                continue
+            if not proposal.operation_names or len(proposal.operation_names) > 5:
+                model_rejection_reasons.append(
+                    "Program must contain between one and five operations."
+                )
+                continue
+            if any(not isinstance(name, str) for name in proposal.operation_names):
+                model_rejection_reasons.append(
+                    "Every proposed operation name must be a string."
+                )
+                continue
+            selected_operations = [
+                operations_by_name.get(name) for name in proposal.operation_names
+            ]
+            if any(operation is None for operation in selected_operations):
+                model_rejection_reasons.append("Proposal referenced an unavailable operation.")
+                continue
+            program = Program(
+                tuple(
+                    operation
+                    for operation in selected_operations
+                    if operation is not None
+                )
+            )
+            if not all(program.apply(source) == target for source, target in examples):
+                model_rejection_reasons.append(
+                    f"Program failed exact demonstration verification: {program.name}"
+                )
+                continue
+            signature = _program_signature(program)
+            model_programs[signature] = program
+            model_program_signatures.add(signature)
+        model_accepted_count = len(model_programs)
+        programs_by_signature = {
+            _program_signature(program): program
+            for program in programs + list(model_programs.values())
+        }
+        programs = sorted(
+            programs_by_signature.values(),
+            key=lambda program: (program.cost, program.name),
+        )
     results: list[SolveResult] = []
     for test_input in test_inputs:
         votes: dict[Grid, list[Program]] = defaultdict(list)
@@ -113,6 +193,13 @@ def solve_task(task: dict[str, Any], max_depth: int = 2) -> list[SolveResult]:
         ranked = sorted(
             votes.items(),
             key=lambda item: (
+                -len(
+                    {
+                        _program_signature(program)
+                        for program in item[1]
+                        if _program_signature(program) in model_program_signatures
+                    }
+                ),
                 -len({program.operations[0].name for program in item[1]}),
                 min(program.cost for program in item[1]),
                 min(program.name for program in item[1]),
@@ -131,6 +218,10 @@ def solve_task(task: dict[str, Any], max_depth: int = 2) -> list[SolveResult]:
                     exact_example,
                     ("exact_demonstration_match",),
                     len(programs),
+                    model_proposal_count,
+                    model_accepted_count,
+                    len(model_rejection_reasons),
+                    tuple(model_rejection_reasons),
                 )
             )
             continue
@@ -141,7 +232,29 @@ def solve_task(task: dict[str, Any], max_depth: int = 2) -> list[SolveResult]:
                 min((program.name for program in group), key=lambda name: (len(name), name))
                 for _, group in ranked[:2]
             )
-            results.append(SolveResult(first, second, names, len(programs)))
+            results.append(
+                SolveResult(
+                    first,
+                    second,
+                    names,
+                    len(programs),
+                    model_proposal_count,
+                    model_accepted_count,
+                    len(model_rejection_reasons),
+                    tuple(model_rejection_reasons),
+                )
+            )
         else:
-            results.append(SolveResult(test_input, test_input, ("fallback_identity",), 0))
+            results.append(
+                SolveResult(
+                    test_input,
+                    test_input,
+                    ("fallback_identity",),
+                    0,
+                    model_proposal_count,
+                    model_accepted_count,
+                    len(model_rejection_reasons),
+                    tuple(model_rejection_reasons),
+                )
+            )
     return results

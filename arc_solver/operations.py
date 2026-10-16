@@ -112,6 +112,7 @@ def _remove_color(grid: Grid, color: int) -> Grid:
     )
 
 
+@lru_cache(maxsize=256)
 def _components(
     grid: Grid,
     background: int,
@@ -252,18 +253,6 @@ def build_operations(examples: list[tuple[Grid, Grid]]) -> list[Operation]:
                 2,
             )
         )
-        operations.append(
-            Operation(
-                f"crop_color_{color}",
-                lambda grid, selected=color: (
-                    None
-                    if (box := bounding_box(grid, selected)) is None
-                    else crop(grid, *box)
-                ),
-                2,
-            )
-        )
-
     for dx, dy in _infer_translations(examples):
         operations.append(
             Operation(
