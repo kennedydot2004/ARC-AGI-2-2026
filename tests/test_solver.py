@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from arc_solver.grids import as_grid
 from arc_solver.inference import solve_task
-from arc_solver.local_model import find_local_qwen_model
+from arc_solver.local_model import LocalQwenProgramProposer, find_local_qwen_model
 from arc_solver.operations import build_operations
 from arc_solver.proposer import ProgramProposal, build_program_prompt, parse_program_proposal
 from arc_solver.submission import exact_match_score, make_submission
@@ -59,6 +61,76 @@ class GridTests(unittest.TestCase):
             )
             (model_dir / "model.safetensors").touch()
             self.assertEqual(find_local_qwen_model(Path(temporary)), model_dir.resolve())
+
+    def test_local_proposer_passes_tensor_ids_to_generation(self) -> None:
+        class FakeTensor:
+            shape = (1, 4)
+
+            def to(self, device):
+                self.device = device
+                return self
+
+        class FakeBatchEncoding(dict):
+            pass
+
+        class FakeGenerated:
+            def __getitem__(self, key):
+                return "generated-token-slice"
+
+        class FakeTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                self.template_kwargs = kwargs
+                return "rendered chat prompt"
+
+            def __call__(self, text, **kwargs):
+                self.tokenizer_kwargs = kwargs
+                self.tokenized_text = text
+                return FakeBatchEncoding(
+                    input_ids=FakeTensor(),
+                    attention_mask=FakeTensor(),
+                )
+
+            def decode(self, token_ids, **kwargs):
+                self.decoded_tokens = token_ids
+                return '{"program":["identity"],"rationale":"Keep the grid."}'
+
+            eos_token_id = 0
+
+        class FakeModel:
+            def get_input_embeddings(self):
+                return types.SimpleNamespace(
+                    weight=types.SimpleNamespace(device="cpu")
+                )
+
+            def generate(self, input_ids, **kwargs):
+                self.generated_input = input_ids
+                self.generate_kwargs = kwargs
+                return FakeGenerated()
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.manual_seed = lambda seed: None
+        fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+        tokenizer = FakeTokenizer()
+        model = FakeModel()
+        proposer = LocalQwenProgramProposer(tokenizer, model)
+        task = {
+            "train": [{"input": [[1]], "output": [[1]]}],
+            "test": [{"input": [[2]]}],
+        }
+
+        with patch.dict("sys.modules", {"torch": fake_torch}):
+            proposals = proposer.propose(
+                task,
+                build_operations([(((1,),), ((1,),))]),
+                count=1,
+            )
+
+        self.assertEqual(tokenizer.template_kwargs["tokenize"], False)
+        self.assertIs(tokenizer.tokenizer_kwargs["add_special_tokens"], False)
+        self.assertIsInstance(model.generated_input, FakeTensor)
+        self.assertIsInstance(model.generate_kwargs["attention_mask"], FakeTensor)
+        self.assertEqual(tokenizer.decoded_tokens, "generated-token-slice")
+        self.assertEqual(proposals[0].operation_names, ("identity",))
 
 
 class SolverTests(unittest.TestCase):

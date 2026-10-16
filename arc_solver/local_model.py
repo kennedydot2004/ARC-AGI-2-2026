@@ -77,7 +77,7 @@ class LocalQwenProgramProposer:
         )
         model = AutoModelForCausalLM.from_pretrained(
             str(model_path),
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto",
             low_cpu_mem_usage=True,
             local_files_only=True,
@@ -96,14 +96,22 @@ class LocalQwenProgramProposer:
             raise ValueError("At least one model proposal is required.")
         operation_names = {operation.name for operation in operations}
         prompt = build_program_prompt(task, operations)
-        input_ids = self.tokenizer.apply_chat_template(
+        prompt_text = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
-            tokenize=True,
+            tokenize=False,
             add_generation_prompt=True,
-            return_tensors="pt",
         )
+        model_inputs = self.tokenizer(
+            prompt_text,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )
+        input_ids = model_inputs["input_ids"]
         device = self.model.get_input_embeddings().weight.device
         input_ids = input_ids.to(device)
+        attention_mask = model_inputs.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
         proposals: list[ProgramProposal] = []
 
         import torch
@@ -114,6 +122,7 @@ class LocalQwenProgramProposer:
                 torch.cuda.manual_seed_all(self.seed + index)
             output_ids = self.model.generate(
                 input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=self.max_new_tokens,
                 do_sample=True,
                 temperature=(0.35, 0.6, 0.85)[index % 3],
