@@ -458,5 +458,42 @@ class SolverTests(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(output)), output)
 
 
+class ExtraOperationTests(unittest.TestCase):
+    def _solve(self, pairs, test_input):
+        task = {
+            "train": [{"input": a, "output": b} for a, b in pairs],
+            "test": [{"input": test_input}],
+        }
+        return solve_task(task)[0]
+
+    def test_gravity_down(self):
+        pairs = [
+            ([[1, 0], [0, 0], [0, 2]], [[0, 0], [0, 0], [1, 2]]),
+            ([[3, 0, 0], [0, 0, 0]], [[0, 0, 0], [3, 0, 0]]),
+        ]
+        result = self._solve(pairs, [[0, 4], [0, 0]])
+        self.assertEqual(result.attempt_1, ((0, 0), (0, 4)))
+
+    def test_fill_enclosed(self):
+        ring = [[1, 1, 1], [1, 0, 1], [1, 1, 1]]
+        filled = [[1, 1, 1], [1, 5, 1], [1, 1, 1]]
+        ring2 = [[0, 0, 0, 0], [0, 1, 1, 1], [0, 1, 0, 1], [0, 1, 1, 1]]
+        filled2 = [[0, 0, 0, 0], [0, 1, 1, 1], [0, 1, 5, 1], [0, 1, 1, 1]]
+        result = self._solve([(ring, filled), (ring2, filled2)], [[1, 1, 1], [1, 0, 1], [1, 1, 1]])
+        self.assertEqual(result.attempt_1, tuple(tuple(r) for r in filled))
+
+    def test_split_boolean_rule(self):
+        def pair(left, right, out):
+            return ([a + [5] + b for a, b in zip(left, right)], out)
+
+        pairs = [
+            pair([[1, 0], [1, 1]], [[2, 2], [0, 2]], [[3, 0], [0, 3]]),
+            pair([[0, 1], [1, 0]], [[2, 0], [2, 0]], [[0, 0], [3, 0]]),
+            pair([[1, 1], [0, 0]], [[0, 2], [0, 2]], [[0, 3], [0, 0]]),
+        ]
+        result = self._solve(pairs, [[1, 1, 5, 2, 0], [0, 1, 5, 2, 2]])
+        self.assertEqual(result.attempt_1, ((3, 0), (0, 3)))
+
+
 if __name__ == "__main__":
     unittest.main()

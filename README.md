@@ -30,7 +30,11 @@ deterministic 200-task public-training holdout, the depth-two symbolic solver
 solved 5 of 212 outputs (2.36%). The hybrid path proposes multiple programs
 per model call, verifies programs on all demonstrations, and allows direct
 grid guesses only after an exact leave-one-example-out check. That model path
-has not yet been rerun on Kaggle, so its score and runtime remain unmeasured.
+scored 0.00 on Kaggle (87 minutes; 1 of 240 tasks passed calibration). The
+extended symbolic operations (symmetry, gravity, enclosed fill, grid-split
+boolean rules and learned local rules) solved 21 tasks versus 7 for the
+previous operation set on two disjoint 200-task public-training samples.
+These are development numbers; public-evaluation tasks are harder.
 
 ## Local development
 

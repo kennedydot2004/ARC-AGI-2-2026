@@ -12,6 +12,7 @@ MODULES = (
     "__init__.py",
     "grids.py",
     "operations.py",
+    "operations_extra.py",
     "proposer.py",
     "local_model.py",
     "inference.py",

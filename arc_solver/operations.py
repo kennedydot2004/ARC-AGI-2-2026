@@ -290,4 +290,7 @@ def build_operations(examples: list[tuple[Grid, Grid]]) -> list[Operation]:
                     ),
                 ]
             )
+    from .operations_extra import build_extra_operations
+
+    operations.extend(build_extra_operations(examples))
     return operations

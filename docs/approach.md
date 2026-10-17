@@ -38,7 +38,11 @@ from the public training set scored 5/212 exact outputs (2.36%) with the
 depth-two symbolic solver. Experimental depth-three beam search found no
 additional hits on that same sample and was about ten times slower, so it
 remains optional rather than the Kaggle default. The calibrated direct
-prediction path has not yet been measured with the Kaggle model.
+prediction path scored 0.00 on Kaggle: 1 of 240 tasks passed calibration and
+5 of 720 candidate programs verified. `operations_extra.py` then added symmetry,
+gravity, enclosed fill, grid-split boolean rules and learned local rules. On two
+disjoint 200-task training samples (every fifth task from offsets 0 and 2) they
+solved 21 tasks versus 7 before, at roughly four times the runtime.
 
 ## Why the next step is not just a bigger brute-force search
 

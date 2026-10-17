@@ -12,6 +12,8 @@ from .proposer import ProgramProposer
 
 _SYNTHESIS_BEAM_WIDTH = 128
 _PATHS_PER_STATE = 3
+_EXTRA_OPERATION_COST = 4
+_LEARNED_PREFIXES = ("local_rule_", "split_")
 
 
 @dataclass(frozen=True)
@@ -200,14 +202,22 @@ def _candidate_programs(
     for program in exact_programs:
         if all(program.apply(source) == target for source, target in examples):
             consistent[_program_signature(program)] = program
-    if consistent:
-        return sorted(
-            consistent.values(),
-            key=lambda program: (program.cost, program.name),
+    ranked = sorted(
+        consistent.values(),
+        key=lambda program: (program.cost, program.name),
+    )
+    if max_depth == 3 and not any(
+        not any(
+            operation.name.startswith(_LEARNED_PREFIXES)
+            for operation in program.operations
         )
-    if max_depth == 3:
-        return _beam_candidate_programs(examples, max_depth, operations)
-    return []
+        for program in ranked
+    ):
+        base_operations = [
+            operation for operation in operations if operation.cost < _EXTRA_OPERATION_COST
+        ]
+        return ranked + _beam_candidate_programs(examples, max_depth, base_operations)
+    return ranked
 
 
 def solve_task(
@@ -326,7 +336,13 @@ def solve_task(
                         if _program_signature(program) in model_program_signatures
                     }
                 ),
-                -len({program.operations[0].name for program in item[1]}),
+                -len(
+                    {
+                        program.operations[0].name
+                        for program in item[1]
+                        if program.operations[0].cost < _EXTRA_OPERATION_COST
+                    }
+                ),
                 min(program.cost for program in item[1]),
                 min(program.name for program in item[1]),
             ),
