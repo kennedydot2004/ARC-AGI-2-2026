@@ -15,17 +15,22 @@ every test output.
 - Include all task IDs and preserve the order of multiple test inputs.
 - Provide `attempt_1` and `attempt_2` for each test output.
 - Run with internet disabled and finish within the competition's 12-hour limit.
-- Publicly available external data and pretrained models are permitted.
+- External data and pretrained models may be used when not prohibited by the
+  host and when they meet Kaggle's accessibility and reasonableness conditions.
+  This project uses public ARC training data only; it does not use private
+  evaluation labels.
 - For prize eligibility, author-created code and methods must be open-sourced
   under a permissive public-domain license such as CC0 or MIT-0.
 
 ## Development status
 
 The initial symbolic baseline is verified but not competitive: on the full
-120-task public evaluation set it solved 0 of 167 test outputs. The hybrid
-model-proposal path is implemented and guarded by exact demonstration checks,
-but model accuracy, latency, and GPU memory use have not yet been measured;
-those require running the Kaggle notebook with attached weights.
+120-task public evaluation set it solved 0 of 167 test outputs. On a
+deterministic 200-task public-training holdout, the depth-two symbolic solver
+solved 5 of 212 outputs (2.36%). The hybrid path proposes multiple programs
+per model call, verifies programs on all demonstrations, and allows direct
+grid guesses only after an exact leave-one-example-out check. That model path
+has not yet been rerun on Kaggle, so its score and runtime remain unmeasured.
 
 ## Local development
 
@@ -54,7 +59,8 @@ limitations, validation protocol, and research direction.
 
 `kaggle/arc_prize_2026_submission.ipynb` is a self-contained notebook that
 finds `arc-agi_test_challenges.json`, loads an attached local Qwen3 model,
-proposes and verifies programs offline, and writes
+proposes and verifies programs offline, calibrates direct grid guesses against
+a withheld training example, and writes
 `/kaggle/working/submission.json`. Attach the
 [Qwen3-30B-A3B-Instruct-2507 Kaggle Model](https://www.kaggle.com/models/qwen-lm/qwen-3/Transformers/30b-a3b-instruct-2507)
 as a notebook input. The model is Apache-2.0 licensed and requires

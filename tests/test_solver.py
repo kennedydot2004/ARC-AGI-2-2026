@@ -11,7 +11,12 @@ from arc_solver.grids import as_grid
 from arc_solver.inference import solve_task
 from arc_solver.local_model import LocalQwenProgramProposer, find_local_qwen_model
 from arc_solver.operations import build_operations
-from arc_solver.proposer import ProgramProposal, build_program_prompt, parse_program_proposal
+from arc_solver.proposer import (
+    ProgramProposal,
+    build_program_prompt,
+    parse_program_proposal,
+    parse_program_proposals,
+)
 from arc_solver.submission import exact_match_score, make_submission
 
 
@@ -43,6 +48,48 @@ class GridTests(unittest.TestCase):
         self.assertIsNone(proposal.operation_names)
         self.assertIn("Unknown operation", proposal.error or "")
 
+    def test_parse_multiple_candidate_programs_and_fill_missing_slots(self) -> None:
+        proposals = parse_program_proposals(
+            '{"programs":[["identity"],["rotate_90"]]}',
+            {"identity", "rotate_90"},
+            count=3,
+        )
+        self.assertEqual(proposals[0].operation_names, ("identity",))
+        self.assertEqual(proposals[1].operation_names, ("rotate_90",))
+        self.assertIn("2 programs; 3 were requested", proposals[2].error or "")
+
+    def test_parse_programs_from_truncated_response(self) -> None:
+        proposals = parse_program_proposals(
+            '{"programs":[["identity"],["rotate_90"]],"calibration_output":["1"],'
+            '"test_outputs":[["2"]',
+            {"identity", "rotate_90"},
+            count=2,
+            test_count=1,
+            require_calibration=True,
+        )
+        self.assertEqual(proposals[0].operation_names, ("identity",))
+        self.assertEqual(proposals[1].operation_names, ("rotate_90",))
+        self.assertEqual(proposals[0].calibration_output, ((1,),))
+        self.assertIn("test_outputs list", proposals[0].direct_output_error or "")
+
+    def test_parse_calibration_and_direct_test_grids(self) -> None:
+        proposals = parse_program_proposals(
+            json.dumps(
+                {
+                    "programs": [["identity"]],
+                    "calibration_output": ["12", "30"],
+                    "test_outputs": [["45", "67"]],
+                }
+            ),
+            {"identity"},
+            count=1,
+            test_count=1,
+            require_calibration=True,
+        )
+        self.assertEqual(proposals[0].calibration_output, ((1, 2), (3, 0)))
+        self.assertEqual(proposals[0].direct_test_outputs, (((4, 5), (6, 7)),))
+        self.assertIsNone(proposals[0].direct_output_error)
+
     def test_prompt_and_local_model_discovery_are_offline_safe(self) -> None:
         task = {
             "train": [{"input": [[1]], "output": [[1]]}],
@@ -52,6 +99,14 @@ class GridTests(unittest.TestCase):
         prompt = build_program_prompt(task, operations)
         self.assertIn("ALLOWED_OPERATIONS=", prompt)
         self.assertIn("Do not write or execute code", prompt)
+        self.assertIn('"programs":', prompt)
+        calibrated_prompt = build_program_prompt(
+            task,
+            operations,
+            calibration_input=((2,),),
+        )
+        self.assertIn("CALIBRATION_INPUT=[[2]]", calibrated_prompt)
+        self.assertNotIn('"output":[[2]]', calibrated_prompt)
         with tempfile.TemporaryDirectory() as temporary:
             model_dir = Path(temporary) / "model"
             model_dir.mkdir()
@@ -80,6 +135,7 @@ class GridTests(unittest.TestCase):
         class FakeTokenizer:
             def apply_chat_template(self, messages, **kwargs):
                 self.template_kwargs = kwargs
+                self.prompt = messages[0]["content"]
                 return "rendered chat prompt"
 
             def __call__(self, text, **kwargs):
@@ -92,7 +148,10 @@ class GridTests(unittest.TestCase):
 
             def decode(self, token_ids, **kwargs):
                 self.decoded_tokens = token_ids
-                return '{"program":["identity"],"rationale":"Keep the grid."}'
+                return (
+                    '{"programs":[["identity"]],"calibration_output":["2"],'
+                    '"test_outputs":[["2"]]}'
+                )
 
             eos_token_id = 0
 
@@ -114,7 +173,10 @@ class GridTests(unittest.TestCase):
         model = FakeModel()
         proposer = LocalQwenProgramProposer(tokenizer, model)
         task = {
-            "train": [{"input": [[1]], "output": [[1]]}],
+            "train": [
+                {"input": [[1]], "output": [[1]]},
+                {"input": [[2]], "output": [[2]]},
+            ],
             "test": [{"input": [[2]]}],
         }
 
@@ -129,8 +191,12 @@ class GridTests(unittest.TestCase):
         self.assertIs(tokenizer.tokenizer_kwargs["add_special_tokens"], False)
         self.assertIsInstance(model.generated_input, FakeTensor)
         self.assertIsInstance(model.generate_kwargs["attention_mask"], FakeTensor)
+        self.assertIn("CALIBRATION_INPUT=[[2]]", tokenizer.prompt)
+        self.assertNotIn('"output":[[2]]', tokenizer.prompt)
         self.assertEqual(tokenizer.decoded_tokens, "generated-token-slice")
         self.assertEqual(proposals[0].operation_names, ("identity",))
+        self.assertEqual(proposals[0].calibration_output, ((2,),))
+        self.assertEqual(proposals[0].direct_test_outputs, (((2,),),))
 
 
 class SolverTests(unittest.TestCase):
@@ -190,6 +256,55 @@ class SolverTests(unittest.TestCase):
         }
         result = solve_task(task)[0]
         self.assertEqual(result.attempt_1, ((4, 2), (3, 1)))
+
+    def test_synthesizes_three_step_crop_rotate_and_tile_program(self) -> None:
+        task = {
+            "train": [
+                {
+                    "input": [
+                        [0, 0, 0, 0],
+                        [0, 1, 2, 0],
+                        [0, 3, 4, 0],
+                        [0, 0, 0, 0],
+                    ],
+                    "output": [
+                        [3, 1, 3, 1],
+                        [4, 2, 4, 2],
+                        [3, 1, 3, 1],
+                        [4, 2, 4, 2],
+                    ],
+                },
+                {
+                    "input": [
+                        [0, 0, 0, 0],
+                        [0, 5, 6, 0],
+                        [0, 7, 8, 0],
+                        [0, 0, 0, 0],
+                    ],
+                    "output": [
+                        [7, 5, 7, 5],
+                        [8, 6, 8, 6],
+                        [7, 5, 7, 5],
+                        [8, 6, 8, 6],
+                    ],
+                },
+            ],
+            "test": [
+                {
+                    "input": [
+                        [0, 0, 0, 0],
+                        [0, 9, 1, 0],
+                        [0, 2, 3, 0],
+                        [0, 0, 0, 0],
+                    ]
+                }
+            ],
+        }
+        result = solve_task(task, max_depth=3)[0]
+        self.assertEqual(
+            result.attempt_1,
+            ((2, 9, 2, 9), (3, 1, 3, 1), (2, 9, 2, 9), (3, 1, 3, 1)),
+        )
 
     def test_exact_demonstration_match_is_preserved(self) -> None:
         task = {
@@ -292,6 +407,39 @@ class SolverTests(unittest.TestCase):
         result = solve_task(task, proposer=proposer)[0]
         self.assertEqual(result.attempt_1, as_grid(test_input))
         self.assertEqual(result.model_accepted_count, 1)
+
+    def test_direct_prediction_is_used_only_after_exact_calibration(self) -> None:
+        task = {
+            "train": [
+                {"input": [[1]], "output": [[1]]},
+                {"input": [[2]], "output": [[2]]},
+            ],
+            "test": [{"input": [[7, 8]]}],
+        }
+        direct = ((8, 7),)
+        verified = FixedProposer(
+            ProgramProposal(
+                ("identity",),
+                "keep the grid",
+                calibration_output=((2,),),
+                direct_test_outputs=(direct,),
+            )
+        )
+        result = solve_task(task, proposer=verified)[0]
+        self.assertEqual(result.attempt_1, direct)
+        self.assertTrue(result.model_calibration_passed)
+
+        uncalibrated = FixedProposer(
+            ProgramProposal(
+                ("identity",),
+                "keep the grid",
+                calibration_output=((9,),),
+                direct_test_outputs=(direct,),
+            )
+        )
+        rejected_result = solve_task(task, proposer=uncalibrated)[0]
+        self.assertNotIn(direct, (rejected_result.attempt_1, rejected_result.attempt_2))
+        self.assertFalse(rejected_result.model_calibration_passed)
 
     def test_submission_order_and_two_attempt_contract(self) -> None:
         challenges = {

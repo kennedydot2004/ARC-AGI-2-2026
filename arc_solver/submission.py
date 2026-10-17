@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from .grids import Grid, as_grid, to_json_grid
 from .inference import solve_task
@@ -15,6 +15,7 @@ def make_submission(
     proposer: ProgramProposer | None = None,
     proposal_count: int = 3,
     diagnostics: list[dict[str, Any]] | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     submission: dict[str, list[dict[str, Any]]] = {}
     for task_id, task in challenges.items():
@@ -34,6 +35,8 @@ def make_submission(
                     "model_accepted": first.model_accepted_count,
                     "model_rejected": first.model_rejected_count,
                     "rejection_reasons": first.model_rejection_reasons,
+                    "model_calibration_passed": first.model_calibration_passed,
+                    "direct_output_error": first.model_direct_output_error,
                 }
             )
         submission[task_id] = [
@@ -43,6 +46,8 @@ def make_submission(
             }
             for prediction in predictions
         ]
+        if progress_callback is not None:
+            progress_callback(len(submission), len(challenges), task_id)
     return submission
 
 

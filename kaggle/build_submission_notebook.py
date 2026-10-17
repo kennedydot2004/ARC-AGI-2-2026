@@ -36,6 +36,7 @@ def build_notebook() -> None:
     )
     run_submission = (
         "import json\n"
+        "import time\n"
         "from pathlib import Path\n"
         "from collections import Counter\n"
         "from arc_solver.local_model import LocalQwenProgramProposer, find_local_qwen_model\n"
@@ -47,20 +48,30 @@ def build_notebook() -> None:
         "    )\n"
         "with input_files[0].open(encoding='utf-8') as stream:\n"
         "    challenges = json.load(stream)\n"
+        "started = time.perf_counter()\n"
         "model_path = find_local_qwen_model(Path('/kaggle/input'))\n"
         "proposer = LocalQwenProgramProposer.from_pretrained(model_path)\n"
         "diagnostics = []\n"
-        "submission = make_submission(challenges, proposer=proposer, proposal_count=3, diagnostics=diagnostics)\n"
+        "def report_progress(completed, total, task_id):\n"
+        "    if completed == 1 or completed % 10 == 0 or completed == total:\n"
+        "        elapsed = time.perf_counter() - started\n"
+        "        print(f'Processed {completed}/{total} tasks in {elapsed / 60:.1f} minutes.', flush=True)\n"
+        "submission = make_submission(challenges, proposer=proposer, proposal_count=3, diagnostics=diagnostics, progress_callback=report_progress)\n"
         "submission_path = Path('/kaggle/working/submission.json')\n"
         "with submission_path.open('w', encoding='utf-8') as stream:\n"
         "    json.dump(submission, stream, separators=(',', ':'))\n"
         "proposal_count = sum(item['model_proposals'] for item in diagnostics)\n"
         "accepted_count = sum(item['model_accepted'] for item in diagnostics)\n"
         "rejected_count = sum(item['model_rejected'] for item in diagnostics)\n"
+        "calibrated_count = sum(item['model_calibration_passed'] for item in diagnostics)\n"
         "reasons = Counter(reason for item in diagnostics for reason in item['rejection_reasons'])\n"
+        "direct_errors = Counter(item['direct_output_error'] for item in diagnostics if item['direct_output_error'])\n"
         "print(f'Wrote {len(submission)} task predictions to {submission_path}')\n"
-        "print(f'Qwen programs accepted: {accepted_count}; rejected: {rejected_count}; proposals: {proposal_count}')\n"
+        "print(f'Qwen generations: {len(diagnostics)}; candidate programs accepted: {accepted_count}; rejected: {rejected_count}; candidates: {proposal_count}')\n"
+        "print(f'Direct model predictions passed leave-one-out calibration: {calibrated_count}/{len(diagnostics)} tasks')\n"
         "print(f'Program rejection reasons: {reasons.most_common(5)}')\n"
+        "print(f'Direct output issues: {direct_errors.most_common(5)}')\n"
+        "print(f'Total elapsed time including model loading: {(time.perf_counter() - started) / 60:.1f} minutes')\n"
     )
     notebook = {
         "cells": [
@@ -70,7 +81,7 @@ def build_notebook() -> None:
                 "source": [
                     "# ARC Prize 2026 - ARC-AGI-2\n",
                     "\n",
-                    "Offline, model-proposed program synthesis with exact symbolic verification. Attach the [Qwen3-30B-A3B-Instruct-2507 Kaggle Model](https://www.kaggle.com/models/qwen-lm/qwen-3/Transformers/30b-a3b-instruct-2507) to the notebook before submission. The source package is embedded by `kaggle/build_submission_notebook.py`.\n",
+                    "Offline, model-proposed program synthesis with exact symbolic verification and leave-one-example-out calibration of direct grid predictions. Attach the [Qwen3-30B-A3B-Instruct-2507 Kaggle Model](https://www.kaggle.com/models/qwen-lm/qwen-3/Transformers/30b-a3b-instruct-2507) to the notebook before submission. The source package is embedded by `kaggle/build_submission_notebook.py`.\n",
                 ],
             },
             {

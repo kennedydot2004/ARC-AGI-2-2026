@@ -20,7 +20,7 @@ def main() -> None:
     parser.add_argument("--challenges", required=True, type=Path)
     parser.add_argument("--output", type=Path, default=Path("submission.json"))
     parser.add_argument("--solutions", type=Path)
-    parser.add_argument("--max-depth", type=int, default=2, choices=(1, 2))
+    parser.add_argument("--max-depth", type=int, default=2, choices=(1, 2, 3))
     args = parser.parse_args()
 
     challenges = _read_json(args.challenges)

@@ -10,6 +10,9 @@ from .grids import Grid, as_grid
 from .operations import Operation, build_operations
 from .proposer import ProgramProposer
 
+_SYNTHESIS_BEAM_WIDTH = 128
+_PATHS_PER_STATE = 3
+
 
 @dataclass(frozen=True)
 class Program:
@@ -55,6 +58,109 @@ class SolveResult:
     model_accepted_count: int = 0
     model_rejected_count: int = 0
     model_rejection_reasons: tuple[str, ...] = ()
+    model_calibration_passed: bool = False
+    model_direct_output_error: str | None = None
+
+
+def _beam_candidate_programs(
+    examples: list[tuple[Grid, Grid]],
+    max_depth: int,
+    operations: list[Operation],
+) -> list[Program]:
+    sources = tuple(source for source, _ in examples)
+    targets = tuple(target for _, target in examples)
+    frontier: dict[tuple[Grid, ...], list[tuple[Operation, ...]]] = {
+        sources: [()]
+    }
+    visited_depth = {sources: 0}
+
+    def distance(state: tuple[Grid, ...]) -> int:
+        total = 0
+        for grid, target in zip(state, targets):
+            height, width = len(grid), len(grid[0])
+            target_height, target_width = len(target), len(target[0])
+            total += 1000 * (
+                abs(height - target_height) + abs(width - target_width)
+            )
+            total += sum(
+                grid[row][column] != target[row][column]
+                for row in range(min(height, target_height))
+                for column in range(min(width, target_width))
+            )
+        return total
+
+    def valid_grid(grid: Grid | None) -> bool:
+        return (
+            grid is not None
+            and 0 < len(grid) <= 30
+            and 0 < len(grid[0]) <= 30
+            and all(len(row) == len(grid[0]) for row in grid)
+            and all(cell in range(10) for row in grid for cell in row)
+        )
+
+    for depth in range(1, max_depth + 1):
+        next_paths: dict[tuple[Grid, ...], list[tuple[Operation, ...]]] = defaultdict(list)
+        exact_programs: dict[tuple[str, ...], Program] = {}
+        for state, prefixes in frontier.items():
+            for operation in operations:
+                if operation.name == "identity":
+                    continue
+                transformed_grids = tuple(operation.apply(grid) for grid in state)
+                if not all(valid_grid(grid) for grid in transformed_grids):
+                    continue
+                transformed = tuple(
+                    grid for grid in transformed_grids if grid is not None
+                )
+                if transformed == state:
+                    continue
+
+                for prefix in prefixes:
+                    sequence = prefix + (operation,)
+                    if transformed == targets:
+                        program = Program(sequence)
+                        exact_programs[_program_signature(program)] = program
+                        continue
+
+                    previous_depth = visited_depth.get(transformed)
+                    if previous_depth is not None and previous_depth < depth:
+                        continue
+                    visited_depth[transformed] = depth
+                    paths = next_paths[transformed]
+                    signature = tuple(item.name for item in sequence)
+                    if any(
+                        tuple(item.name for item in existing) == signature
+                        for existing in paths
+                    ):
+                        continue
+                    paths.append(sequence)
+
+        if exact_programs:
+            return sorted(
+                exact_programs.values(),
+                key=lambda program: (program.cost, program.name),
+            )
+        if depth == max_depth:
+            break
+
+        ranked_states = sorted(
+            next_paths.items(),
+            key=lambda item: (
+                distance(item[0]),
+                min(sum(operation.cost for operation in path) for path in item[1]),
+                min(" -> ".join(operation.name for operation in path) for path in item[1]),
+            ),
+        )[:_SYNTHESIS_BEAM_WIDTH]
+        frontier = {}
+        for state, paths in ranked_states:
+            frontier[state] = sorted(
+                paths,
+                key=lambda path: (
+                    sum(operation.cost for operation in path),
+                    " -> ".join(operation.name for operation in path),
+                ),
+            )[:_PATHS_PER_STATE]
+
+    return []
 
 
 def _candidate_programs(
@@ -66,10 +172,11 @@ def _candidate_programs(
     one_step: list[tuple[Operation, Grid | None]] = [
         (operation, operation.apply(first_input)) for operation in operations
     ]
-    exact_programs: list[Program] = []
-    for operation, result in one_step:
-        if result == first_output:
-            exact_programs.append(Program((operation,)))
+    exact_programs: list[Program] = [
+        Program((operation,))
+        for operation, result in one_step
+        if result == first_output
+    ]
 
     if max_depth >= 2:
         intermediates: dict[Grid, list[Operation]] = defaultdict(list)
@@ -92,8 +199,15 @@ def _candidate_programs(
     consistent: dict[tuple[str, ...], Program] = {}
     for program in exact_programs:
         if all(program.apply(source) == target for source, target in examples):
-            consistent[tuple(op.name for op in program.operations)] = program
-    return sorted(consistent.values(), key=lambda program: (program.cost, program.name))
+            consistent[_program_signature(program)] = program
+    if consistent:
+        return sorted(
+            consistent.values(),
+            key=lambda program: (program.cost, program.name),
+        )
+    if max_depth == 3:
+        return _beam_candidate_programs(examples, max_depth, operations)
+    return []
 
 
 def solve_task(
@@ -103,8 +217,8 @@ def solve_task(
     proposal_count: int = 3,
 ) -> list[SolveResult]:
     """Infer a transformation from all demonstrations and predict each test input."""
-    if max_depth not in (1, 2):
-        raise ValueError("max_depth must be 1 or 2.")
+    if max_depth not in (1, 2, 3):
+        raise ValueError("max_depth must be 1, 2, or 3.")
     if proposal_count < 1:
         raise ValueError("proposal_count must be positive.")
     raw_train = task.get("train")
@@ -124,6 +238,9 @@ def solve_task(
     model_accepted_count = 0
     model_rejection_reasons: list[str] = []
     model_program_signatures: set[tuple[str, ...]] = set()
+    model_direct_outputs: tuple[Grid, ...] | None = None
+    model_calibration_passed = False
+    model_direct_output_error: str | None = None
     if proposer is not None:
         safe_task = {
             "train": [
@@ -137,6 +254,15 @@ def solve_task(
         operations_by_name = {operation.name: operation for operation in operations}
         model_programs: dict[tuple[str, ...], Program] = {}
         for proposal in proposals:
+            if proposal.direct_output_error is not None:
+                model_direct_output_error = proposal.direct_output_error
+            if (
+                proposal.calibration_output is not None
+                and proposal.direct_test_outputs is not None
+            ):
+                if proposal.calibration_output == examples[-1][1]:
+                    model_direct_outputs = proposal.direct_test_outputs
+                    model_calibration_passed = True
             if proposal.error is not None:
                 model_rejection_reasons.append(proposal.error)
                 continue
@@ -222,26 +348,59 @@ def solve_task(
                     model_accepted_count,
                     len(model_rejection_reasons),
                     tuple(model_rejection_reasons),
+                    model_calibration_passed,
+                    model_direct_output_error,
                 )
             )
             continue
         if ranked:
-            first = ranked[0][0]
-            second = ranked[1][0] if len(ranked) > 1 else first
+            symbolic_first = ranked[0][0]
+            symbolic_second = ranked[1][0] if len(ranked) > 1 else symbolic_first
             names = tuple(
                 min((program.name for program in group), key=lambda name: (len(name), name))
                 for _, group in ranked[:2]
             )
+            if model_direct_outputs is not None:
+                first = model_direct_outputs[len(results)]
+                second = (
+                    symbolic_first
+                    if symbolic_first != first
+                    else symbolic_second
+                )
+                program_names = ("calibrated_model_prediction",) + names[:1]
+            else:
+                first = symbolic_first
+                second = symbolic_second
+                program_names = names
             results.append(
                 SolveResult(
                     first,
                     second,
-                    names,
+                    program_names,
                     len(programs),
                     model_proposal_count,
                     model_accepted_count,
                     len(model_rejection_reasons),
                     tuple(model_rejection_reasons),
+                    model_calibration_passed,
+                    model_direct_output_error,
+                )
+            )
+        elif model_direct_outputs is not None:
+            first = model_direct_outputs[len(results)]
+            second = test_input if test_input != first else first
+            results.append(
+                SolveResult(
+                    first,
+                    second,
+                    ("calibrated_model_prediction",),
+                    0,
+                    model_proposal_count,
+                    model_accepted_count,
+                    len(model_rejection_reasons),
+                    tuple(model_rejection_reasons),
+                    model_calibration_passed,
+                    model_direct_output_error,
                 )
             )
         else:
@@ -255,6 +414,8 @@ def solve_task(
                     model_accepted_count,
                     len(model_rejection_reasons),
                     tuple(model_rejection_reasons),
+                    model_calibration_passed,
+                    model_direct_output_error,
                 )
             )
     return results

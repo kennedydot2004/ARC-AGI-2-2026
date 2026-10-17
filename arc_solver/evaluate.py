@@ -84,7 +84,7 @@ def evaluate_directory(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate on labeled ARC JSON task files.")
     parser.add_argument("directory", type=Path)
-    parser.add_argument("--max-depth", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--max-depth", type=int, choices=(1, 2, 3), default=2)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--model-path", type=Path)
     parser.add_argument("--proposals", type=int, default=3)

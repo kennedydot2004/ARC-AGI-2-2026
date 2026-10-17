@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .operations import Operation
-from .proposer import ProgramProposal, build_program_prompt, parse_program_proposal
+from .grids import Grid, as_grid
+from .operations import Operation, build_operations
+from .proposer import ProgramProposal, build_program_prompt, parse_program_proposals
 
 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
@@ -43,7 +44,7 @@ class LocalQwenProgramProposer:
         self,
         tokenizer: Any,
         model: Any,
-        max_new_tokens: int = 384,
+        max_new_tokens: int = 2048,
         seed: int = 2026,
     ) -> None:
         if max_new_tokens < 64:
@@ -94,8 +95,30 @@ class LocalQwenProgramProposer:
     ) -> list[ProgramProposal]:
         if count < 1:
             raise ValueError("At least one model proposal is required.")
-        operation_names = {operation.name for operation in operations}
-        prompt = build_program_prompt(task, operations)
+        train = task["train"]
+        has_calibration = len(train) >= 2
+        prompt_task = dict(task)
+        calibration_input: Grid | None = None
+        prompt_operations = operations
+        if has_calibration:
+            calibration_pair = train[-1]
+            prompt_task["train"] = train[:-1]
+            calibration_input = as_grid(calibration_pair["input"])
+            visible_examples = [
+                (
+                    as_grid(pair["input"]),
+                    as_grid(pair["output"]),
+                )
+                for pair in prompt_task["train"]
+            ]
+            prompt_operations = build_operations(visible_examples)
+        operation_names = {operation.name for operation in prompt_operations}
+        prompt = build_program_prompt(
+            prompt_task,
+            prompt_operations,
+            candidate_count=count,
+            calibration_input=calibration_input,
+        )
         prompt_text = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=False,
@@ -112,26 +135,28 @@ class LocalQwenProgramProposer:
         attention_mask = model_inputs.get("attention_mask")
         if attention_mask is not None:
             attention_mask = attention_mask.to(device)
-        proposals: list[ProgramProposal] = []
-
         import torch
 
-        for index in range(count):
-            torch.manual_seed(self.seed + index)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(self.seed + index)
-            output_ids = self.model.generate(
-                input_ids,
-                attention_mask=attention_mask,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=True,
-                temperature=(0.35, 0.6, 0.85)[index % 3],
-                top_p=0.9,
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-            response = self.tokenizer.decode(
-                output_ids[0, input_ids.shape[1] :],
-                skip_special_tokens=True,
-            )
-            proposals.append(parse_program_proposal(response, operation_names))
-        return proposals
+        torch.manual_seed(self.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.seed)
+        output_ids = self.model.generate(
+            input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=self.max_new_tokens,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+            pad_token_id=self.tokenizer.eos_token_id,
+        )
+        response = self.tokenizer.decode(
+            output_ids[0, input_ids.shape[1] :],
+            skip_special_tokens=True,
+        )
+        return parse_program_proposals(
+            response,
+            operation_names,
+            count,
+            test_count=len(task["test"]),
+            require_calibration=has_calibration,
+        )
